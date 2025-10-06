@@ -5,32 +5,37 @@ import time
 from typing import Tuple
 import numpy as np
 import pybullet as p
+import gymnasium as gym
 from gymnasium import spaces
 
-from sim_envs.gym_set.goal_env import GoalEnvWrapper
+from sim_envs.gymnasium_utils.goal_env import GoalEnvWrapper
 from sim_envs.utils.pybullet_utils import (
     p_step,
     get_link_pose,
-    wrap_angle,
-    UrdfObject
+    wrap_angle
 )
 from sim_envs.tasks.psm_env import PsmEnv
 from sim_envs.const import ASSET_DIR_PATH
 
-class NeedlePickRL(PsmEnv):
+class NeedlePickEnv(PsmEnv):
     POSE_TRAY = ((0.55, 0, 0.6751), (0, 0, 0))
     WORKSPACE_LIMITS = ((0.50, 0.60), (-0.05, 0.05), (0.685, 0.745))  # reduce tip pad contact
-    SCALING = 5.
+    NEEDLE_SIZE = 0.03
+    SCALING = 5.    # 决定针和tray的大小, 并且缩放工作空间
+    NEEDLE_WORKSPACE = SCALING * np.array([[WORKSPACE_LIMITS[0][0] + NEEDLE_SIZE, WORKSPACE_LIMITS[0][1] - NEEDLE_SIZE],
+                                        [WORKSPACE_LIMITS[1][0] + NEEDLE_SIZE, WORKSPACE_LIMITS[1][1] - NEEDLE_SIZE],
+                                        [WORKSPACE_LIMITS[2][0]+0.01, WORKSPACE_LIMITS[2][0]+0.01]])
 
     # TODO: grasp is sometimes not stable; check how to fix it
 
     def __init__(self, render_mode=None, cid=-1):
         super().__init__(render_mode, cid)
         self.current_step = 0
-        self.max_episode_steps = 200  # max steps per episode
+        self.max_episode_steps = 100  # max steps per episode
         self.needle_id = None
 
         self._env_setup()
+        p_step(0.3)  # wait for stable
 
         # 初始化任务目标, 如果想要读取goal, 调用 self.goal
         self.goal = self._sample_goal()
@@ -41,10 +46,9 @@ class NeedlePickRL(PsmEnv):
 
     def step(self, action: np.ndarray):
         """
-        执行一步环境交互，并返回符合 Gymnasium API 的5个值。
+        执行一步环境交互，并返回符合 Gymnasium API 的5个值
         """
-        # 1. 预处理动作并驱动机器人、步进仿真
-        #    这部分可以调用父类 PsmEnv 的辅助方法
+        # 预处理动作并驱动机器人、步进仿真 (调用父类 PsmEnv 的辅助方法)
         self.current_step += 1
         if len(action.shape) > 1:
             action = action.squeeze()
@@ -52,14 +56,14 @@ class NeedlePickRL(PsmEnv):
         self._set_action(action)
         p_step(self._duration)
 
-        self._step_callback()  # 任务相关的回调函数
+        self._step_callback()  # 仿真执行的回调函数
         obs = self._get_obs()
 
         terminated = False
         truncated = False
         info = {}
 
-        achieved_goal, _ = self._get_task_obs()  # Needle position
+        achieved_goal, *waypoints = self._get_task_obs()  # Needle position
         # 没有达到goal, 就是-1, 达到就是0
         reward = self.compute_reward(achieved_goal, self.goal, {})  # 没有用 info
 
@@ -86,31 +90,49 @@ class NeedlePickRL(PsmEnv):
         return obs, reward, terminated, truncated, info
 
     def reset(self, seed=None, options=None):
-        super().reset(seed=seed, options=options)
+        """ 初始化环境之后, 就要调用 reset 方法, 返回初始观测和信息 """
+        super().reset(seed, options)
 
-        self.current_step = 0
+        if self._activated != -1:
+            self._release(self._activated)      # 放下物体, 解开约束
+        self.psm1.move_jaw(np.deg2rad(80.0))  # open jaw to move the needle
 
         # tray pad也需要重置
+        p.resetBasePositionAndOrientation(self.obj_ids['fixed'][0],
+                                          np.array(self.POSE_TRAY[0]) * self.SCALING,
+                                          p.getQuaternionFromEuler(self.POSE_TRAY[1]))
 
-        # 暂时不随机化针的位置
-        workspace_limits = self.workspace_limits1
-        yaw = 0.1 * np.pi
-        p.resetBasePositionAndOrientation(self.needle_id,
-                                          (workspace_limits[0].mean(),
-                                           workspace_limits[1].mean(),
-                                           workspace_limits[2][0] + 0.01),
-                                          p.getQuaternionFromEuler((0, 0, yaw)))
+        # 重置Needle位置, 未给定则随机放置
+        if options and  "needle_pose" in options:
+            needle_pose = options["needle_pose"]
+            p.resetBasePositionAndOrientation(self.needle_id, needle_pose[0],
+                                               p.getQuaternionFromEuler(needle_pose[1]))
+        else:
+            needle_pose = self.np_random.uniform(low=self.NEEDLE_WORKSPACE[:,0], high=self.NEEDLE_WORKSPACE[:,1])
+            # yaw = 0.1 * np.pi
+            yaw = self.np_random.uniform(-0.5, 0.5) * np.pi
+            p.resetBasePositionAndOrientation(self.needle_id,
+                                            tuple(needle_pose),
+                                            p.getQuaternionFromEuler((0, 0, yaw)))
+        # print(f"- Needle init pose: {np.round(needle_pose, 4)}, yaw: {yaw:.4f} rad")
+
+        self.psm1.close_jaw()  # close jaw
 
         p_step(0.3)  # 让针落到桌面上
 
-        self.goal = self._sample_goal().copy()     # 目标最终位置
+        if options and "goal" in options:
+            self.goal = options["goal"]
+        else:
+            self.goal = self._sample_goal()     # 目标最终位置
         self._sample_goal_callback()        # 根据needle位置设置waypoints
+
+        self.current_step = 0
 
         return self._get_obs(), {}
 
     def _env_setup(self):
-        """ 加载环境中需要的物体, 并进行必要的设置 """
-        super(NeedlePickRL, self)._env_setup()
+        """ 只加载环境中需要的物体, 并进行必要的设置 """
+        super(NeedlePickEnv, self)._env_setup()
         # 将父类的设置清除, 重新设置
         self.psm_1_matrices.clear()
         self.psm_1_jaw.clear()
@@ -135,6 +157,8 @@ class NeedlePickRL(PsmEnv):
                             np.array(self.POSE_TRAY[0]) * self.SCALING,
                             p.getQuaternionFromEuler(self.POSE_TRAY[1]),
                             globalScaling=self.SCALING)
+        # p.resetBasePositionAndOrientation(tray_id, np.array(self.POSE_TRAY[0]) * self.SCALING,
+        #                                   p.getQuaternionFromEuler(self.POSE_TRAY[1]))
         self.obj_ids['fixed'].append(tray_id)  # 1
 
         # needle, 此处未做随机化位置
@@ -148,71 +172,70 @@ class NeedlePickRL(PsmEnv):
                             globalScaling=self.SCALING)
 
         # 对needle的操作全部基于inertial坐标系
-        p.resetBasePositionAndOrientation(needle_id, (workspace_limits[0].mean(),  # 重置为初始位置(inertial偏差)
-                                                     workspace_limits[1].mean(),
-                                                     workspace_limits[2][0] + 0.01),
-                                                     p.getQuaternionFromEuler((0, 0, yaw)))
+        # p.resetBasePositionAndOrientation(needle_id, (workspace_limits[0].mean(),  # 重置为初始位置(inertial偏差)
+        #                                              workspace_limits[1].mean(),
+        #                                              workspace_limits[2][0] + 0.01),
+        #                                              p.getQuaternionFromEuler((0, 0, yaw)))
         self.needle_id = needle_id
         p.changeVisualShape(needle_id, -1, specularColor=(80, 80, 80))
         self.obj_ids['rigid'].append(needle_id)  # 0
         self.obj_id, self.obj_link1 = self.obj_ids['rigid'][0], 1       # 明确needle为object
 
-    def _get_task_obs(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _get_task_obs(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         # 获得被抓取物体的抓取位置和姿态
         if self.has_object:
             pos, orn = get_link_pose(self.obj_id, -1)
             object_pos = np.array(pos)
-            object_orn = np.array(orn)
+            object_orn = np.array(p.getEulerFromQuaternion(np.array(orn)))
             pos, orn = get_link_pose(self.obj_id, self.obj_link1)
             waypoint_pos = np.array(pos)
-            waypoint_orn = np.array(orn)
-        else:
-            object_pos = np.zeros(3)
+            waypoint_orn = np.array(p.getEulerFromQuaternion(np.array(orn)))
 
+        # object pos: 物体位置; waypoint pos: 抓取位置
         if self._waypoint_goal:
             achieved_pos, achieved_orn = waypoint_pos, waypoint_orn
         else:
             achieved_pos, achieved_orn = object_pos, object_orn
 
         if self.has_object:
-            return achieved_pos, achieved_orn
+            return achieved_pos, achieved_orn, object_pos, object_orn
         else:
             raise ValueError("NeedlePick task must have object!")
 
-    def _get_obs(self) -> np.ndarray:
+    def _get_obs(self) -> np.ndarray[np.float32]:
         robot_state = self._get_robot_state(idx=0)     # 7-dim
 
-        object_pos, object_orn = self._get_task_obs()       # needle position (3-dim)
+        achieved_pos, achieved_orn, object_pos, object_orn  = self._get_task_obs()   # 3-dim, 3-dim, 3-dim, 3-dim
         object_rel_pos = object_pos - robot_state[0:3]      # 物体相对位置 (3-dim)
-        waypoint_pos, waypoint_orn = np.array(object_pos), np.array(p.getEulerFromQuaternion(object_orn))       # np.array可以创建副本
 
-        # 通过 self.goal 访问
         goal = self.goal.copy()      # 任务目标位置(3-dim), 将针放到哪里去
+        achieved_goal = achieved_pos.copy() # 被抓点的位置(3-dim)
 
-        # 观测包括：机器人状态, 物体位置, 物体相对位置, waypoint位置和姿态
+        # 观测(19-dim)：机器人状态, 物体位置, 物体相对位置, waypoint位置和姿态
         observation = np.concatenate([
             robot_state, object_pos.ravel(), object_rel_pos.ravel(),
-            waypoint_pos.ravel(), waypoint_orn.ravel()  # achieved_goal.copy(),
+            achieved_pos.ravel(), achieved_orn.ravel()
         ])
 
-        # 将所有信息拼接成一个扁平的向量并返回
-        #   顺序：机器人状态, 物体位置, 目标位置
-        return np.concatenate([observation, object_pos, goal])
+        # return np.concatenate([observation.ravel(), achieved_goal.ravel(), goal.ravel()]).astype('float32')
+        return observation.ravel().astype(np.float32) # (19-dim)
 
-    def _sample_goal(self) -> np.ndarray:
+    def _sample_goal(self, random=True) -> np.ndarray:
         """ Samples a new goal and returns it.
         """
         workspace_limits = self.workspace_limits1
-        goal = np.array([workspace_limits[0].mean() + 0.01 * np.random.randn() * self.SCALING,
-                         workspace_limits[1].mean() + 0.01 * np.random.randn() * self.SCALING,
-                         workspace_limits[2][1] - 0.04 * self.SCALING])
-        goal = np.array([workspace_limits[0].mean() ,
-                         workspace_limits[1].mean() ,
-                         workspace_limits[2][1] - 0.04 * self.SCALING])
+        if random:
+            goal = np.array([workspace_limits[0].mean() + 0.01 * self.np_random.standard_normal() * self.SCALING,
+                            workspace_limits[1].mean() + 0.01 * self.np_random.standard_normal() * self.SCALING,
+                            workspace_limits[2][1] - 0.04 * self.SCALING])
+        else:
+            goal = np.array([workspace_limits[0].mean() ,
+                            workspace_limits[1].mean() ,
+                            workspace_limits[2][1] - 0.04 * self.SCALING])
         return goal.copy()
 
     def _sample_goal_callback(self):
-        """ Define waypoints
+        """ Define waypoints based on the sampled goal and needle position
         """
         super()._sample_goal_callback()
         self._waypoints = [None, None, None, None]  # four waypoints
@@ -245,7 +268,6 @@ class NeedlePickRL(PsmEnv):
                                        pos_obj[2] + (-0.0007 + 0.0102) * self.SCALING, yaw, -0.5])  # grasp
         self._waypoints[3] = np.array([self.goal[0], self.goal[1],
                                        self.goal[2] + 0.0102 * self.SCALING, yaw, -0.5])  # lift up
-        print(f"\n -> Waypoints 2: {self._waypoints[2]}")
 
     def _meet_contact_constraint_requirement(self):
         # add a contact constraint to the grasped block to make it stable
@@ -278,6 +300,46 @@ class NeedlePickRL(PsmEnv):
 
         return action
 
+class GoalNeedlePickEnv(NeedlePickEnv):
+    def __init__(self, render_mode=None, cid=-1):
+        super().__init__(render_mode, cid)
+
+        original_observation_space = self.observation_space
+        goal_shape = self.goal.shape
+
+        self.observation_space = spaces.Dict({
+            'observation': original_observation_space,
+            'achieved_goal': spaces.Box(-np.inf, np.inf, shape=goal_shape, dtype=np.float32),
+            'desired_goal': spaces.Box(-np.inf, np.inf, shape=goal_shape, dtype=np.float32),
+        })
+
+    def _create_goal_observation(self, obs):
+        # 创建 goal-based 观测
+        observation = obs
+        achieved_goal, *waypoints = self._get_task_obs()   # 物体位置
+        desired_goal = self.goal         # 目标位置
+
+        goal_observation = {
+            'observation': observation,
+            'achieved_goal': achieved_goal.astype('float32'),
+            'desired_goal': desired_goal.astype('float32')
+        }
+        return goal_observation
+    
+    def step(self, action):
+        observation, reward, terminated, truncated, info = super().step(action)
+        # 将 observation 包装成字典格式
+        goal_obs = self._create_goal_observation(observation)
+        return goal_obs, reward, terminated, truncated, info
+    
+    def reset(self, seed=None, options=None):
+        observation, info = super().reset(seed=seed, options=options)
+
+        goal_observation = self._create_goal_observation(observation)
+
+        return goal_observation, info
+    
+
 def test(env, horizon=200):
     """
     Run the test simulation without any learning algorithm for debugging purposes
@@ -301,7 +363,7 @@ def test(env, horizon=200):
             total_reward += reward
 
             achieved_goal = env._get_task_obs()[0].copy()
-            achieved_goal = obs[7:10].copy()
+            # achieved_goal = obs[7:10].copy()
             desired_goal = env.goal.copy()
             print(f" -> Needle Pos (Achieved): {np.round(achieved_goal, 4)}")
             print(f" -> Desired Pos:  {np.round(desired_goal, 4)}")
@@ -325,12 +387,15 @@ def test(env, horizon=200):
         env.close()
 
 if __name__ == "__main__":
-    env = NeedlePickRL(render_mode="human")  # create one process and corresponding env
+    import sim_envs.gymnasium_utils
 
-    goal_based_env = GoalEnvWrapper(env)
+    # env = gym.make('NeedlePick-v0', render_mode="human")
 
+    env = NeedlePickEnv(render_mode="human")  # create one process and corresponding env
+
+    env.reset()
     test(env=env, horizon=50)
-    # env.render()
+    env.render()
     # time.sleep(200)
     env.close()
     time.sleep(2)

@@ -1,3 +1,4 @@
+import numpy as np
 import pybullet as p
 import pybullet_data
 import time
@@ -73,17 +74,14 @@ class URDFViewer:
                 useFixedBase=use_fixed_base,
                 physicsClientId=self.client_id
             )
-
-            urdf_object = UrdfObject(obj_id)
-            urdf_object.reset_base_pose(position, orientation_quat)
             
             self.loaded_objects[obj_id] = urdf_path
             print(f"成功加载 '{urdf_path}', 物体ID为: {obj_id}")
-            return obj_id, urdf_object
+            return obj_id
             
         except p.error as e:
             print(f"加载 '{urdf_path}' 失败: {e}")
-            return -1, -1
+            return -1
 
     def run(self):
         """
@@ -117,31 +115,58 @@ if __name__ == "__main__":
     viewer = URDFViewer(window_title="URDF Viewer")
 
     # 2. 加载你的第一个（主要）URDF文件
-    # !!! 修改为你自己URDF文件的路径 !!!
-    my_urdf_file = os.path.join(asset_path, "needle/needle_40mm.urdf") # 这是一个pybullet_data自带的例子，你可以换成自己的路径
+    # my_urdf_file = os.path.join(asset_path, "needle/needle_40mm.urdf") # 这是一个pybullet_data自带的例子，你可以换成自己的路径
+    needle_urdf_file = os.path.join(asset_path, "needle/needle_40mm.urdf")
+    tray_file = os.path.join(asset_path, "tray/tray_pad.urdf")
+    table_file = os.path.join(asset_path, "table/table.urdf")
 
-    target_pos = [0, 0, 0.5]  # 你想要放置物体的位置
-    target_orn = [0, 0, 0]    # 物体的欧拉角姿态
+    SCALING = 5.0
+    POSE_TRAY = ((0.55, 0, 0.6751), (0, 0, 0))
+    POSE_TABLE = ((0.5, 0, 0.001), (0, 0, 0))
 
-    obj_id, urdf_object = viewer.load_urdf(
-        urdf_path=my_urdf_file,
-        position=target_pos,
-        orientation_euler=target_orn,
-        scale=1,
+    needle_id = viewer.load_urdf(
+        urdf_path=needle_urdf_file,
+        position=(0, 0, 1),
+        orientation_euler=(0, 0, 0),
+        scale=SCALING,
+        use_fixed_base=False
+    )
+    
+    tray_id = viewer.load_urdf(
+        urdf_path=tray_file,
+        position=np.array(POSE_TRAY[0]) * SCALING,
+        orientation_euler=POSE_TRAY[1],
+        scale=SCALING,
+        use_fixed_base=False
+    )
+
+    print(f"设置tray的初始位置和姿态为: {np.array(POSE_TRAY[0]) * SCALING}")
+
+    table_id = viewer.load_urdf(
+        urdf_path=table_file,
+        position=np.array(POSE_TABLE[0]) * SCALING,
+        orientation_euler=POSE_TABLE[1],
+        scale=SCALING,
         use_fixed_base=True
     )
 
-    read_pos, read_orn = urdf_object.get_base_pose()
+    print(f"加载后")
+    tray_pos, tray_orn = p.getBasePositionAndOrientation(tray_id)
+    tray_orn = p.getEulerFromQuaternion(tray_orn)
+    print(f"托盘位置: {tray_pos}, 姿态 (rpy): {tray_orn}")
 
-    # [验证]
-    print("\n--- 验证 ---")
-    print(f"设置的基座位置: {[f'{x:.4f}' for x in target_pos]}")
-    print(f"读取的基座位置: {[f'{x:.4f}' for x in read_pos]}")
+    try:
+        for i in range(100):
+            p.stepSimulation()
+            time.sleep(1./240.)
 
-    # [对比]
-    # 直接用pybullet API读取的是重心位置，你会看到它和我们读取的位置不同
-    com_pos, _ = p.getBasePositionAndOrientation(urdf_object.obj_id)
-    print(f"PyBullet API直接读取的重心位置: {[f'{x:.4f}' for x in com_pos]}")
+        tray_pos, tray_orn = p.getBasePositionAndOrientation(tray_id)
+        tray_orn = p.getEulerFromQuaternion(tray_orn)
+        print(f"托盘位置: {tray_pos}, 姿态 (rpy): {tray_orn}")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        viewer.close()
 
     # 4. 运行查看器，直到窗口被关闭
     viewer.run()

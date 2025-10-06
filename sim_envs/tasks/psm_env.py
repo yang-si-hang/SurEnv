@@ -3,7 +3,7 @@ import numpy as np
 import pybullet as p
 from gymnasium import spaces
 
-from sim_envs.gym_set.sur_env import SurEnv
+from sim_envs.gymnasium_utils.sur_env import SurEnv
 from sim_envs.robots.psm import Psm1, Psm2
 from sim_envs.utils.pybullet_utils import (
     get_link_pose,
@@ -106,11 +106,17 @@ class PsmEnv(SurEnv):
         self.psm_1_matrices.clear()
         self.psm_1_jaw.clear()
 
-        workspace_limits = self.workspace_limits1
-        pos = (workspace_limits[0][0],
-               workspace_limits[1][1],
-               (workspace_limits[2][1] + workspace_limits[2][0]) / 2)
-        orn = (0.5, 0.5, -0.5, -0.5)
+        if options and "psm_pose" in options:
+            pos = options["psm_pose"][0]
+            orn = options["psm_pose"][1]
+        else:
+            workspace_limits = self.workspace_limits1
+            pos = (self.np_random.uniform(workspace_limits[0][0], workspace_limits[0][1]),
+                self.np_random.uniform(workspace_limits[1][0], workspace_limits[1][1]),
+                (workspace_limits[2,0] + workspace_limits[2,1]) / 2)
+        orn = (0.5, 0.5, -0.5, -0.5)    # 姿态固定
+        # print("- Reset psm1 to position: ", pos, " orientation: ", orn)
+
         joint_positions = self.psm1.inverse_kinematics((pos, orn), self.psm1.EEF_LINK_INDEX)
         self.psm1.reset_joint(joint_positions)
         self.block_gripper = False
@@ -127,7 +133,7 @@ class PsmEnv(SurEnv):
         self.obj_ids = {'fixed': [], 'rigid': [], 'deformable': []}
 
         # camera
-        if self._render_mode == 'human':
+        if self.render_mode == 'human':
             reset_camera(yaw=90.0, pitch=-30.0, dist=0.82 * self.SCALING,
                          target=(-0.05 * self.SCALING, 0, 0.36 * self.SCALING))
 
@@ -560,3 +566,11 @@ class PsmsEnv(PsmEnv):
         # else:
         #     self.psm2.move_jaw(np.deg2rad(40))
         #     self._release(1)
+
+if __name__ == '__main__':
+    env = PsmEnv(render_mode='human')
+    env._env_setup()    # 最好全部从init函数中剥离, 氛围加载环境+设置环境
+    obs, info = env.reset()
+    env.render()
+    time.sleep(100)
+    env.close()

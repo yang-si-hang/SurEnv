@@ -29,11 +29,14 @@ class SurEnv(gym.Env):
     refer to: https://github.com/openai/gym/blob/master/gym/core.py
     """
 
-    metadata = {'render.modes': ['human', 'rgb_array', 'img_array']}
+    metadata = {
+        'render_modes': ['human', 'rgb_array', 'img_array'],
+        'render_fps': 30
+        }
 
     def __init__(self, render_mode: str = None, cid: int = -1):
         # rendering and connection options
-        self._render_mode = render_mode
+        self.render_mode = render_mode  # 共有属性, 但不能修改
         # render_mode = 'human'
         # if render_mode == 'human':
         #     self.cid = p.connect(p.SHARED_MEMORY)
@@ -72,7 +75,7 @@ class SurEnv(gym.Env):
 
         self.obj_ids = {'fixed': [], 'rigid': [], 'deformable': []}
 
-        self.seed()
+        # self.seed()
 
         # # self.actions = []  # only for demo
         # self._env_setup()
@@ -157,6 +160,9 @@ class SurEnv(gym.Env):
     
     def reset(self, seed=None, options=None):
         super().reset(seed=seed, options=options)
+        if self.np_random is None:
+            # 调用 seeding.np_random(seed=None) 会自动使用系统熵来创建 RNG
+            self._np_random, self._np_random_seed = seeding.np_random(seed)
         return self._get_obs(), {}
 
     def close(self):
@@ -164,55 +170,24 @@ class SurEnv(gym.Env):
             p.disconnect()
             self.cid = -1
 
-    def render(self, mode='rgb_array'):
-        self._render_callback(mode)
-        if mode == "human":
+    def render(self): #, mode='rgb_array'):
+        if self.render_mode is None:
+            return
+        self._render_callback(self.render_mode)
+
+        if self.render_mode == "human":
             return np.array([])
         # TODO: check the way to render image
         rgb_array, mask = render_image(RENDER_WIDTH, RENDER_HEIGHT,
                                        self._view_matrix, self._proj_matrix)
-        if mode == 'rgb_array':
+        if self.render_mode == 'rgb_array':
             return rgb_array
         else:
             return rgb_array, mask
-        
-    def show(self):
-        pass
-        # """
-        # 创建一个临时的PyBullet GUI实例, 仅用于显示环境的初始静态场景。
-        # 此方法不影响环境的主仿真实例。
-        # """
-        # # 1. 连接到一个新的、临时的GUI客户端
-        # print("正在启动临时PyBullet GUI用于场景展示...")
-        # try:
-        #     show_client_id = p.connect(p.GUI)
-        #     if show_client_id < 0:
-        #         print("无法连接到PyBullet GUI。")
-        #         return
-            
-        #     # 2. 复用场景设置和资源加载的逻辑
-        #     self._setup_scene(client_id=show_client_id)
-        #     self._load_assets(client_id=show_client_id)
-            
-        #     # 3. 复用将实体放置到初始位置的逻辑
-        #     self._reset_entities(client_id=show_client_id)
-            
-        #     # 4. 保持窗口开启，直到用户在控制台按下回车
-        #     print("\n========================================================")
-        #     print("  场景已加载。您可以自由缩放、旋转和平移视角。")
-        #     print("  完成观察后，请返回此控制台窗口并按下 'Enter' 键关闭。")
-        #     print("========================================================\n")
-        #     input()
-            
-        # finally:
-        #     # 5. 确保无论发生什么，临时的GUI连接都会被断开
-        #     if 'show_client_id' in locals() and p.isConnected(show_client_id):
-        #         p.disconnect(show_client_id)
-        #         print("临时PyBullet GUI已断开。")
 
-    def seed(self, seed=None):
-        self._np_random, seed = seeding.np_random(seed)
-        return [seed]
+    # def seed(self, seed=None):
+    #     self._np_random, seed = seeding.np_random(seed)
+    #     return [seed]
 
     def compute_reward(self, achieved_goal, desired_goal, info):
         raise NotImplementedError
