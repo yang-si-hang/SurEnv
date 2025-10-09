@@ -85,6 +85,7 @@ class NeedlePickEnv(PsmEnv):
             # 即使回合结束，我们也获取一次“最终”的观测状态(这对于很多算法的价值函数计算至关重要)
             final_obs = self._get_obs()
             info['final_observation'] = final_obs
+            info['episode_length'] = self.current_step
 
         # 返回符合 Gymnasium 标准的 5-元组
         return obs, reward, terminated, truncated, info

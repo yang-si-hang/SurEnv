@@ -175,6 +175,9 @@ class SurEnv(gym.Env):
             return
         self._render_callback(self.render_mode)
 
+        if self.render_mode not in self.metadata['render_modes']:
+            raise ValueError(f'render_mode {self.render_mode} not in {self.metadata["render_modes"]}')
+
         if self.render_mode == "human":
             return np.array([])
         # TODO: check the way to render image
@@ -182,12 +185,10 @@ class SurEnv(gym.Env):
                                        self._view_matrix, self._proj_matrix)
         if self.render_mode == 'rgb_array':
             return rgb_array
-        else:
+        elif self.render_mode == 'img_array':
             return rgb_array, mask
-
-    # def seed(self, seed=None):
-    #     self._np_random, seed = seeding.np_random(seed)
-    #     return [seed]
+        else:
+            raise ValueError(f'render_mode {self.render_mode} not recognized')
 
     def compute_reward(self, achieved_goal, desired_goal, info):
         raise NotImplementedError
