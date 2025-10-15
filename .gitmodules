@@ -1,3 +1,6 @@
 [submodule "diffusion_policy"]
 	path = diffusion_policy
 	url = https://github.com/yang-si-hang/diffusion_policy.git
+[submodule "act"]
+	path = act
+	url = https://github.com/yang-si-hang/act.git
