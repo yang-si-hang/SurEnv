@@ -1,2 +1,6 @@
 __pycache__/
 .vscode/
+
+*.egg-info/
+.installed.cfg
+*.egg

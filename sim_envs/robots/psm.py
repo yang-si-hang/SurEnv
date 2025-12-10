@@ -110,6 +110,7 @@ class Psm(Arm):
             -abs_input[1], abs_input[1],  # 11, 12
             positions[13],  # 13 (0.0)
             positions[14], positions[15],  # 14 (0.0), 15 (0.0)
+            # positions[16],  # 16 (0.0), wrist camera joint不能这样加，因为不知道关节是哪个序号
         ]
         return joint_positions
 

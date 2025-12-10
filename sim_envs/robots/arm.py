@@ -178,10 +178,13 @@ class Arm(object):
     def move(self, abs_input: np.ndarray, link_index=None) -> [bool, np.ndarray]:
         """
         Absolute translation in Cartesian space (RCM frame).
+        Use inverse kinematics to compute the joint positions.
         Set target joint positions without actual physical move (need pybullet to step).
-        :param abs_input: the absolute translation you want to make (in Cartesian space, tip_T_rcm, 4*4).
-        :param link_index: the index for the link to compute inverse kinematics; should be consistent with dVRK.
-        :return: whether or not able to reach the given input.
+        Args:
+            abs_input: the absolute translation you want to make (in Cartesian space, tip_T_rcm, 4*4).
+            link_index: the index for the link to compute inverse kinematics; should be consistent with dVRK.
+        Returns:
+            whether or not able to reach the given input.
         """
         assert abs_input.shape == (4, 4)
         if link_index is None:
@@ -190,7 +193,7 @@ class Arm(object):
         pose_world = self.pose_rcm2world(abs_input, 'tuple')
         # joints_inv = np.array(inverse_kinematics(self.body, self.EEF_LINK_INDEX,
         #                                          pose_world[0], pose_world[1]))
-        joints_inv = self.inverse_kinematics(pose_world, link_index)
+        joints_inv = self.inverse_kinematics(pose_world, link_index)    # 依然需要调用pybullet的IK函数
         return self.move_joint(joints_inv)
 
     def update_rcm_pose(self):

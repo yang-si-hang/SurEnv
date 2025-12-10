@@ -16,7 +16,10 @@ MAX_DISTANCE = 0
 
 def p_step(duration=1.0):
     # 仿真步走多少sec, pybullet默认240Hz
-    for i in range(int(duration * 240)):
+    params = p.getPhysicsEngineParameters()
+    time_step = params['fixedTimeStep']
+    for i in range(int(duration / time_step)):
+    # for i in range(int(duration * 480)):
         p.stepSimulation()
 
 
@@ -844,8 +847,9 @@ def get_camera():
     return CameraInfo(*p.getDebugVisualizerCamera())
 
 
-def render_image(width, height, view_matrix, proj_matrix, shadow=1):
-    (_, _, px, _, mask) = p.getCameraImage(width=width,
+def render_image(width:float, height:float, view_matrix, proj_matrix, shadow=1):
+    """ read image array from pybullet camera """
+    (w, h, px, depth, mask) = p.getCameraImage(width=width,
                                            height=height,
                                            viewMatrix=view_matrix,
                                            projectionMatrix=proj_matrix,
@@ -859,6 +863,116 @@ def render_image(width, height, view_matrix, proj_matrix, shadow=1):
     rgb_array = rgb_array[:, :, :3]
     return rgb_array, mask
 
+def get_attached_camera_view_matrix(body_id, link_index, 
+                                    local_pos=(0, 0, 0), 
+                                    local_orn=(0, 0, 0, 1), # 四元数
+                                    target_dist=0.5):
+    """
+    计算附着在某个 Link 上的相机 View Matrix
+    
+    Args:
+        body_id: 机器人的 body unique id
+        link_index: 要附着的 link 索引
+        local_pos: 相机相对于 Link 原点的坐标 (x, y, z)
+        local_orn: 相机相对于 Link 的旋转 (四元数)，决定相机看向哪
+        target_dist: 视线焦点的距离（仅用于计算 target 向量）
+    """    
+    # 获取 Link 在世界坐标系的实时位姿
+    state = p.getLinkState(body_id, link_index, computeForwardKinematics=True)  # computeForwardKinematics=True 确保拿到的是最新渲染帧的位置
+    link_world_pos = state[4]
+    link_world_orn = state[5]
+
+    # 坐标变换：Local -> World. T_world_cam = T_world_link * T_link_cam
+    cam_world_pos, cam_world_orn = p.multiplyTransforms(
+        link_world_pos, link_world_orn,
+        local_pos, local_orn
+    )
+
+    rot_mat = np.array(p.getMatrixFromQuaternion(cam_world_orn)).reshape(3, 3)
+    
+    # 假设相机局部坐标系定义为：Z轴指向前方(View)，Y轴指向下方(Down)
+    cam_right_vec = rot_mat[:, 0]
+    cam_up_vec = rot_mat[:, 1]
+    cam_forward_vec = rot_mat[:, 2]
+
+    cam_target_pos = np.array(cam_world_pos) + cam_forward_vec * target_dist
+
+    # pybullet中默认的 Up Vector 是 Y 轴向上
+    view_matrix = p.computeViewMatrix(
+        cameraEyePosition=cam_world_pos,
+        cameraTargetPosition=cam_target_pos,
+        cameraUpVector=-cam_up_vec
+    )
+    
+    return view_matrix
+
+
+""" Coordinate transformation """
+
+def get_pose_in_camera_frame(obj_pos, obj_orn, view_matrix_list:list):
+    """
+    将物体位姿从世界坐标系转换到 PyBullet (Opencv) 相机坐标系, Y轴朝上
+    
+    Args:
+        obj_pos: [x, y, z] 物体世界坐标位置
+        obj_orn: [x, y, z, w] 物体世界坐标四元数
+        view_matrix_list: PyBullet computeViewMatrix 返回的 16 个浮点数列表
+        
+    Returns:
+        pos_in_cam: [x, y, z] 在相机坐标系下的位置
+        mat_in_cam: 3x3 旋转矩阵，在相机坐标系下的旋转
+    """
+    rot_mat = np.array(p.getMatrixFromQuaternion(obj_orn)).reshape(3, 3)
+    
+    T_world_obj = np.eye(4)
+    T_world_obj[:3, :3] = rot_mat
+    T_world_obj[:3, 3] = obj_pos
+    
+    T_view = np.array(view_matrix_list).reshape(4, 4).T  # 转置一下，变成标准的变换矩阵形式
+    
+    T_cam_obj = T_view @ T_world_obj
+    
+    pos_in_cam = T_cam_obj[:3, 3]
+    rot_in_cam = T_cam_obj[:3, :3]
+    
+    # 构建转换矩阵：绕 X 轴旋转 180 度, X 不变, Y -> -Y, Z -> -Z
+    T_gl_cv = np.array([
+        [1,  0,  0],
+        [0, -1,  0],
+        [0,  0, -1]
+    ])
+    
+    pos_cv = T_gl_cv @ pos_in_cam
+    rot_cv = T_gl_cv @ rot_in_cam
+    
+    return pos_cv, rot_cv
+
+def compute_delta_rotations(quat_seq):
+    """
+    计算一系列四元数之间的相对旋转矩阵序列
+    Args:
+        quat_seq: N x 4 的四元数序列，格式为 [x, y, z, w]
+    Returns:
+        delta_matrices: (N-1) x 9 的相对旋转矩阵序列
+    """
+    if not isinstance(quat_seq, np.ndarray) or quat_seq.ndim != 2 or quat_seq.shape[1] != 4:
+        raise ValueError("quat_seq must be a numpy array of shape (N, 4)")
+    
+    delta_matrices = []
+    num_steps = np.shape(quat_seq)[0]
+    
+    for i in range(num_steps - 1):
+        q_curr = quat_seq[i]
+        q_next = quat_seq[i+1]
+        
+        # 这些数学函数直接可用
+        _, q_curr_inv = p.invertTransform([0,0,0], q_curr)
+        _, q_delta = p.multiplyTransforms([0,0,0], q_curr_inv, [0,0,0], q_next)
+        rot_mat_flat = p.getMatrixFromQuaternion(q_delta)
+        
+        delta_matrices.append(np.array(rot_mat_flat))
+    
+    return np.array(delta_matrices)
 
 class UrdfObject:
     """

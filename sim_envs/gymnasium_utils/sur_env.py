@@ -31,8 +31,11 @@ class SurEnv(gym.Env):
 
     metadata = {
         'render_modes': ['human', 'rgb_array', 'img_array'],
-        'render_fps': 30
+        'render_fps': 30,
+        'obs_modes': ['state', 'rgb', 'rgbd'],
         }
+    
+    FPS = 100    # 30Hz来step
 
     def __init__(self, render_mode: str = None, cid: int = -1):
         # rendering and connection options
@@ -59,7 +62,12 @@ class SurEnv(gym.Env):
                 # TODO: not able to run on remote server
                 egl = pkgutil.get_loader('eglRenderer')
                 plugin = p.loadPlugin(egl.get_filename(), "_eglRendererPlugin")
-        # camera related setting
+        p.setTimeStep(1. / 500.)  # important for p.stepSimulation()
+
+        params = p.getPhysicsEngineParameters()
+        print(f"Pybullet time step: {params['fixedTimeStep']}")
+
+        # render camera settings for debug or visualization
         self._view_matrix = p.computeViewMatrixFromYawPitchRoll(cameraTargetPosition=(0, 0, 0.2),
                                                                 distance=1.5,
                                                                 yaw=90,
@@ -97,7 +105,8 @@ class SurEnv(gym.Env):
         #     raise NotImplementedError
 
         # @taohuang
-        self._duration = 0.2  # important for mini-steps
+        # self._duration = 0.2  # important for mini-steps
+        self._duration = 1. / self.FPS
 
     # 在子类(任务)中实现
     # def step(self, action: np.ndarray):

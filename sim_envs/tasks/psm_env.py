@@ -8,7 +8,7 @@ from sim_envs.robots.psm import Psm1, Psm2
 from sim_envs.utils.pybullet_utils import (
     get_link_pose,
     wrap_angle,
-    reset_camera
+    reset_camera, render_image, get_attached_camera_view_matrix
 )
 from sim_envs.utils.robotics import (
     get_euler_from_matrix,
@@ -48,8 +48,7 @@ class PsmEnv(SurEnv):
     psm_1_jaw = []
 
 
-    def __init__(self,
-                 render_mode=None, cid=-1):
+    def __init__(self, render_mode=None, cid=-1, obs_type="state"):
         # workspace
         workspace_limits = np.asarray(self.WORKSPACE_LIMITS1) \
                            + np.array([0., 0., 0.0102]).reshape((3, 1))  # tip-eef offset with collision margin
@@ -61,18 +60,33 @@ class PsmEnv(SurEnv):
         self._waypoint_goal = False
         self.obj_id, self.obj_link1, self.obj_link2 = None, None, None  # obj_link: waypoint link
 
+        # initial tcp pose in world frame
+        self.tcp_pose_init = None
+
         # gripper
         self.block_gripper = True
         self._activated = -1
 
+        # camera
+        self.obs_type = obs_type
+        self.camera_img_size = (640, 480)  # W, H
+
         super(PsmEnv, self).__init__(render_mode, cid)
+
+        # obs_dict = {
+        #     "robot_state": spaces.Box(-np.inf, np.inf, shape=(7,), dtype='float32') # 先用∞占位
+        # }
+
+        # if self.obs_type in ["rgb", "rgbd"]:    # define camera image space
+        #     img_shape = (self.camera_img_size[1], self.camera_img_size[0], 3) # H, W, C
+        #     obs_dict["wrist_image"] = spaces.Box(0, 255, shape=img_shape, dtype=np.uint8)
 
         # self._env_setup()   # 只能在init(任务子类)中调用一次
 
         # distance_threshold
         self.distance_threshold = self.DISTANCE_THRESHOLD * self.SCALING
 
-        # render related setting
+        # render related setting, override the view matrix in SurEnv
         self._view_matrix = p.computeViewMatrixFromYawPitchRoll(
             cameraTargetPosition=(-0.05 * self.SCALING, 0, 0.375 * self.SCALING),
             distance=0.81 * self.SCALING,
@@ -89,6 +103,22 @@ class PsmEnv(SurEnv):
         #     roll=0,
         #     upAxisIndex=2
         # )
+
+        # wrist camera settings
+        self._wrist_delta_pos = tuple(np.array([0.009, 0, -0.0]) * self.SCALING)  # in the local frame
+        self._wrist_delta_orn = p.getQuaternionFromEuler((0, -np.pi*0/180, np.pi/2))
+        self._wrist_proj_mat = p.computeProjectionMatrixFOV(
+            fov=120, aspect=self.camera_img_size[0] / self.camera_img_size[1], 
+            nearVal=0.01, farVal=20.0)
+
+        # env camera provide a global view for data collection
+        self._env_view_mat = p.computeViewMatrixFromYawPitchRoll(
+            cameraTargetPosition=tuple(np.array([0.55, 0, 0.6751]) * self.SCALING), # 与table中心对齐
+            distance=0.2 * self.SCALING,
+            yaw=90, pitch=-40, roll=0, upAxisIndex=2)
+        self._env_proj_mat = p.computeProjectionMatrixFOV(
+            fov=45, aspect=self.camera_img_size[0] / self.camera_img_size[1], 
+            nearVal=0.1, farVal=20.0)
 
         self.action_space = spaces.Box(-1., 1., shape=(self.action_size,), dtype='float32')
 
@@ -123,7 +153,10 @@ class PsmEnv(SurEnv):
         # physical interaction
         self._contact_approx = False
 
-        return self._get_robot_state(idx=0), {}
+        tcp_pose = self._get_robot_state(idx=0)
+        self.tcp_pose_init = tcp_pose.copy()
+
+        return tcp_pose, {}
 
     def _env_setup(self):
         super(PsmEnv, self)._env_setup()    # 设置重力, 加载floor
@@ -132,7 +165,7 @@ class PsmEnv(SurEnv):
         # for venv
         self.obj_ids = {'fixed': [], 'rigid': [], 'deformable': []}
 
-        # camera
+        # reset camera position
         if self.render_mode == 'human':
             reset_camera(yaw=90.0, pitch=-30.0, dist=0.82 * self.SCALING,
                          target=(-0.05 * self.SCALING, 0, 0.36 * self.SCALING))
@@ -160,9 +193,13 @@ class PsmEnv(SurEnv):
         # for goal plotting
         obj_id = p.loadURDF(os.path.join(ASSET_DIR_PATH, 'sphere/sphere.urdf'),
                             globalScaling=self.SCALING)
+        self.goal_sphere_id = obj_id
         self.obj_ids['fixed'].append(obj_id)  # 0
 
-        pass  # need to implement based on every task
+        # initialize, reset in reset()
+        self.tcp_pose_init = self._get_robot_state(idx=0)
+
+        # pass  # need to implement based on every task
         # self.obj_ids
 
         # # only for demo
@@ -175,7 +212,7 @@ class PsmEnv(SurEnv):
         # self.actions = []
 
     def _get_robot_state(self, idx: int) -> np.ndarray:
-        # robot state: tip pose in the world coordinate
+        """ robot state: tip pose in the world coordinate """
         psm = self.psm1 if idx == 0 else self.psm2
         pose_world = psm.pose_rcm2world(psm.get_current_position(), 'tuple')
         jaw_angle = psm.get_current_jaw_position()
@@ -183,8 +220,47 @@ class PsmEnv(SurEnv):
             np.array(pose_world[0]), np.array(p.getEulerFromQuaternion(pose_world[1])), np.array(jaw_angle).ravel()
         ])  # 3 + 3 + 1 = 7
 
+    def _get_wrist_camera_image(self, idx:int):
+        psm = self.psm1 if idx == 0 else self.psm2
+
+        body_id = psm.body
+        view_matrix = get_attached_camera_view_matrix(
+            body_id, 3, local_pos=self._wrist_delta_pos, local_orn=self._wrist_delta_orn
+        )   # "3" is the 'psm_tool_roll_link' index
+
+        w, h = self.camera_img_size[0], self.camera_img_size[1]
+        rgb_array, _ = render_image(w, h, view_matrix, self._wrist_proj_mat)
+        return rgb_array
+
+    def _get_env_camera_image(self):
+        w, h = self.camera_img_size[0], self.camera_img_size[1]
+        rgb_array, _ = render_image(w, h, self._env_view_mat, self._env_proj_mat)
+        return rgb_array
+
     def _get_obs(self) -> dict:
         robot_state = self._get_robot_state(idx=0)
+
+        obs_dict = {
+            "robot_state": robot_state.astype(np.float32),
+        }
+
+        if self.obs_type in ["rgb", "rgbd"]:    # get wrist camera image
+            p.changeVisualShape(self.goal_sphere_id, -1, rgbaColor=[1, 0, 0, 1])
+            env_img, _ = render_image(
+                self.camera_img_size[0], self.camera_img_size[1], self._env_view_mat, self._env_proj_mat
+                )
+
+            # set goal sphere transparent to hide it in wrist camera view
+            p.changeVisualShape(self.goal_sphere_id, -1, rgbaColor=[1, 0, 0, 0])
+            wrist_img = self._get_wrist_camera_image(idx=0)
+            
+            obs_dict["images"] = {
+                    "env_cam": env_img.astype(np.uint8),
+                    "wrist_cam": wrist_img.astype(np.uint8),
+                }
+        
+        return obs_dict
+    
         # # TODO: may need to modify
         # if self.has_object:
         #     pos, _ = get_link_pose(self.obj_id, -1)
@@ -215,17 +291,17 @@ class PsmEnv(SurEnv):
         #     'achieved_goal': achieved_goal.copy(),
         #     'desired_goal': self.goal.copy()
         # }
-        return robot_state
+        # return robot_state
 
     def _set_action(self, action: np.ndarray):
         """
         delta_position (3), delta_theta (1) and open/close the gripper (1)
         in the world frame
         """
-        assert len(action) == self.ACTION_SIZE, "The action should have the save dim with the ACTION_SIZE"
+        assert len(action) == self.ACTION_SIZE, "The action should have the same dim with the ACTION_SIZE"
         # time0 = time.time()
         action = action.copy()  # ensure that we don't change the action outside of this scope
-        action[:3] *= 0.01 * self.SCALING  # position, limit maximum change in position
+        # action[:3] *= 0.01 * self.SCALING  # position, limit maximum change in position
         pose_world = self.psm1.pose_rcm2world(self.psm1.get_current_position())
         workspace_limits = self.workspace_limits1
         pose_world[:3, 3] = np.clip(pose_world[:3, 3] + action[:3],
