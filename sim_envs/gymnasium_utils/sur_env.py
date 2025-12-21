@@ -30,12 +30,12 @@ class SurEnv(gym.Env):
     """
 
     metadata = {
-        'render_modes': ['human', 'rgb_array', 'img_array'],
+        'render_modes': ['None', 'human', 'rgb_array', 'rgb_array_list'],
         'render_fps': 30,
         'obs_modes': ['state', 'rgb', 'rgbd'],
         }
     
-    FPS = 100    # 30Hz来step
+    FPS = 100    # step方法的运行频率
 
     def __init__(self, render_mode: str = None, cid: int = -1):
         # rendering and connection options
@@ -194,7 +194,7 @@ class SurEnv(gym.Env):
                                        self._view_matrix, self._proj_matrix)
         if self.render_mode == 'rgb_array':
             return rgb_array
-        elif self.render_mode == 'img_array':
+        elif self.render_mode == 'rgb_array_list':
             return rgb_array, mask
         else:
             raise ValueError(f'render_mode {self.render_mode} not recognized')

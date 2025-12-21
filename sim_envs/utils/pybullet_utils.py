@@ -297,6 +297,12 @@ def violates_limits(body, joints, values):
 
 
 def wrap_angle(theta):
+    """
+    Wraps the given angle to the range [-pi, pi].
+
+    Returns:
+        float: The wrapped angle in the range [-pi, pi].
+    """
     return (theta + np.pi) % (2 * np.pi) - np.pi
 
 
@@ -916,7 +922,7 @@ def get_pose_in_camera_frame(obj_pos, obj_orn, view_matrix_list:list):
     Args:
         obj_pos: [x, y, z] 物体世界坐标位置
         obj_orn: [x, y, z, w] 物体世界坐标四元数
-        view_matrix_list: PyBullet computeViewMatrix 返回的 16 个浮点数列表
+        view_matrix_list: PyBullet computeViewMatrix的16个浮点数列表 (column major), 无需求逆
         
     Returns:
         pos_in_cam: [x, y, z] 在相机坐标系下的位置
@@ -928,6 +934,7 @@ def get_pose_in_camera_frame(obj_pos, obj_orn, view_matrix_list:list):
     T_world_obj[:3, :3] = rot_mat
     T_world_obj[:3, 3] = obj_pos
     
+    # opengl format (column major, need transpose)
     T_view = np.array(view_matrix_list).reshape(4, 4).T  # 转置一下，变成标准的变换矩阵形式
     
     T_cam_obj = T_view @ T_world_obj

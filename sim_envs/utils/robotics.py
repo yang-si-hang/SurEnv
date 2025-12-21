@@ -1,5 +1,9 @@
 """
 Helper functions for robotics-related calculation
+Include:
+- pose and matrix conversion
+- intrinsic matrix calculation
+- soft body related functions
 """
 import numpy as np
 from scipy.spatial.transform import Rotation as R       # 可能有问题
@@ -50,6 +54,15 @@ def get_matrix_from_euler(ori):
     """
     rot = R.from_euler('xyz', ori)
     return rot.as_matrix()
+
+def get_quat_from_matrix(matrix:np.array)->np.array:
+    """
+    使用 Scipy 将 3x3 旋转矩阵转换为四元数 [x, y, z, w]
+    """
+    # 确保输入是 numpy array
+    r = R.from_matrix(matrix)
+    # as_quat() 默认返回顺序为 [x, y, z, w]
+    return r.as_quat()
 
 
 def get_intrinsic_matrix(width, height, fov):

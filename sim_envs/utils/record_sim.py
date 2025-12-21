@@ -20,31 +20,49 @@ DEMO_DIR = DATA_DIR_PATH / f"demo/{TASK_NAME}-{EPISODE_NUM}"
 # shutil.rmtree(DEMO_DIR)
 DEMO_DIR.mkdir(parents=True, exist_ok=True)
 
+"""
+For each timestep:
+observations
+- images
+    - each_cam_name     (480, 640, 3) 'uint8'
+- root_state            (8,)          'float32'
+
+action                  (10,)         'float32'
+"""
+
 success = []
 saved = 0
+i = 0
 
-for i in range(EPISODE_NUM):
+while i < EPISODE_NUM*3 and saved < EPISODE_NUM:
     print(f"{'='*5} Try to record episode {i}...")
 
-    env = gym.make(f'{TASK_NAME}', render_mode="rgb_array", obs_type="rgb", max_episode_steps=800)
+    env = gym.make(f'{TASK_NAME}', render_mode="rgb_array", obs_type="rgb", max_episode_steps=600)
 
     try:
         obs, info = env.reset()
         terminated = False
         truncated = False
+        padding = False
         step:int = 0
+        true_step:int = 0
         total_reward:float = 0
+
         data_dict = {   # TODO 需要根据任务修改
-            '/observations/robot_state': [],
+            '/observations/robot_state': [obs["robot_state"].copy()],
             '/action': [],
         }
         if env.unwrapped.obs_type in ['rgb', 'rgbd']:
-            data_dict['/observations/images/wrist_cam'] = []
-            data_dict['/observations/images/env_cam'] = []
+            data_dict['/observations/images/wrist_cam'] = [obs["images"]["wrist_cam"].copy()]
+            data_dict['/observations/images/env_cam'] = [obs["images"]["env_cam"].copy()]
 
-        while not (terminated or truncated):
+        # while not (terminated or truncated):
+        while not truncated:    # gym自动包装终止条件
             rob_pose = env.unwrapped._get_robot_state(idx=0)  # 7-dim
-            action = env.unwrapped.get_oracle_action(rob_pose)
+            if padding:
+                action = np.zeros(env.action_space.shape)
+            else:
+                action = env.unwrapped.get_oracle_action(rob_pose)
 
             rob_state = obs["robot_state"].copy()
             data_dict['/observations/robot_state'].append(rob_state)
@@ -60,11 +78,19 @@ for i in range(EPISODE_NUM):
 
             step += 1
 
+            if terminated and padding is False:
+                # 此处逻辑还需微调
+                if info.get('is_success', False):
+                    true_step = step  # 包含终止状态
+                    padding = True  # 补零到最大步数
+                else:
+                    break
+
         final_rob_state = obs["robot_state"].copy()
         data_dict['/observations/robot_state'].append(final_rob_state)
 
         if info.get('is_success', False):
-            print(f"Total Reward: {total_reward}, Steps: {step}")
+            print(f"Total Reward: {total_reward}, Steps: {true_step}")
             print("Result: ✅ Success!")
             success.append(True)
         else:
@@ -95,22 +121,23 @@ for i in range(EPISODE_NUM):
             data_dict[key] = value[:final_len]
 
         dataset_index = saved
-        dataset_path = DEMO_DIR / f'{dataset_index}'
+        dataset_path = DEMO_DIR / f'{dataset_index:04d}'
         with h5py.File(dataset_path.with_suffix('.hdf5'), 'w', rdcc_nbytes=1024 ** 2 * 2) as root:
             root.attrs['sim'] = True
             root.attrs['episode_length'] = final_len
+            root.attrs['episode_length_true'] = true_step
 
-            root.create_dataset('action', (final_len, 10), dtype='float32',) # 3+6+1
+            root.create_dataset('action', (final_len, 10), dtype='float32', compression="gzip", compression_opts=4) # 3+6+1
 
             obs = root.create_group('observations')
-            obs.create_dataset('robot_state', (final_len, 8), dtype='float32',) # 3+4+1
+            obs.create_dataset('robot_state', (final_len, 8), dtype='float32', compression="gzip", compression_opts=4) # 3+4+1
 
             image = obs.create_group('images') 
 
             _ = image.create_dataset('wrist_cam', (final_len, 480, 640, 3), dtype='uint8',
-                                    chunks=(1, 480, 640, 3), )
+                                    chunks=(1, 480, 640, 3), compression='gzip', compression_opts=4)
             _ = image.create_dataset('env_cam', (final_len, 480, 640, 3), dtype='uint8',
-                                    chunks=(1, 480, 640, 3), )
+                                    chunks=(1, 480, 640, 3), compression='gzip', compression_opts=4)
 
             for name, array in data_dict.items():
                 root[name][...] = array
@@ -119,6 +146,7 @@ for i in range(EPISODE_NUM):
         env.close()
 
         saved += 1
+        i += 1
 
 print(f'Saved to {DEMO_DIR}')
 print(f'Success: {np.sum(success)} / {len(success)}')

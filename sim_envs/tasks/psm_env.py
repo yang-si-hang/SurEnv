@@ -34,7 +34,7 @@ class PsmEnv(SurEnv):
     ravens
     https://github.com/google-research/ravens/blob/master/ravens/environments/environment.py
     """
-    ACTION_SIZE = 5  # (dx, dy, dz, dyaw/dpitch, open/close)
+    ACTION_SIZE = 5  # (dx, dy, dz, dyaw/dpitch, jaw angle (radian))
     ACTION_MODE = 'yaw'
     DISTANCE_THRESHOLD = 0.005
     POSE_PSM1 = ((0.05, 0.24, 0.8524), (0, 0, -(90 + 20) / 180 * np.pi))
@@ -73,14 +73,6 @@ class PsmEnv(SurEnv):
 
         super(PsmEnv, self).__init__(render_mode, cid)
 
-        # obs_dict = {
-        #     "robot_state": spaces.Box(-np.inf, np.inf, shape=(7,), dtype='float32') # 先用∞占位
-        # }
-
-        # if self.obs_type in ["rgb", "rgbd"]:    # define camera image space
-        #     img_shape = (self.camera_img_size[1], self.camera_img_size[0], 3) # H, W, C
-        #     obs_dict["wrist_image"] = spaces.Box(0, 255, shape=img_shape, dtype=np.uint8)
-
         # self._env_setup()   # 只能在init(任务子类)中调用一次
 
         # distance_threshold
@@ -95,14 +87,6 @@ class PsmEnv(SurEnv):
             roll=0,
             upAxisIndex=2
         )
-        # self._view_matrix = p.computeViewMatrixFromYawPitchRoll(
-        #     cameraTargetPosition=(-0.05 * self.SCALING, 0, 0.345 * self.SCALING),
-        #     distance=0.77 * self.SCALING,
-        #     yaw=90,
-        #     pitch=-30,
-        #     roll=0,
-        #     upAxisIndex=2
-        # )
 
         # wrist camera settings
         self._wrist_delta_pos = tuple(np.array([0.009, 0, -0.0]) * self.SCALING)  # in the local frame
@@ -120,7 +104,12 @@ class PsmEnv(SurEnv):
             fov=45, aspect=self.camera_img_size[0] / self.camera_img_size[1], 
             nearVal=0.1, farVal=20.0)
 
-        self.action_space = spaces.Box(-1., 1., shape=(self.action_size,), dtype='float32')
+        # define real action sapce based on fps and scaling
+        self.action_space = spaces.Box(
+            low=np.array([-0.2, -0.2, -0.2, -90, -np.deg2rad(10)*self.FPS/self.SCALING], dtype=np.float32)*self.SCALING/self.FPS,
+            high=np.array([0.2, 0.2, 0.2, 90, np.deg2rad(80)*self.FPS/self.SCALING], dtype=np.float32)*self.SCALING/self.FPS,
+            dtype='float32'
+        )
 
     def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info):
         """ All sparse reward.
@@ -212,7 +201,9 @@ class PsmEnv(SurEnv):
         # self.actions = []
 
     def _get_robot_state(self, idx: int) -> np.ndarray:
-        """ robot state: tip pose in the world coordinate """
+        """ robot state: tip pose in the world coordinate
+        7-dim: 3-dim position, 3-dim euler angle, 1-dim jaw angle
+        """
         psm = self.psm1 if idx == 0 else self.psm2
         pose_world = psm.pose_rcm2world(psm.get_current_position(), 'tuple')
         jaw_angle = psm.get_current_jaw_position()
@@ -295,35 +286,35 @@ class PsmEnv(SurEnv):
 
     def _set_action(self, action: np.ndarray):
         """
-        delta_position (3), delta_theta (1) and open/close the gripper (1)
-        in the world frame
+        delta_position (3), delta_theta (1) and gripper jaw absolute radian angle (1) in the world frame
+        set target pose of robots and step in pybullet sim loop
+        no clip scale here!
         """
         assert len(action) == self.ACTION_SIZE, "The action should have the same dim with the ACTION_SIZE"
-        # time0 = time.time()
-        action = action.copy()  # ensure that we don't change the action outside of this scope
-        # action[:3] *= 0.01 * self.SCALING  # position, limit maximum change in position
+        action = action.copy()
+        pose_world_next = np.zeros((4,4))
+
         pose_world = self.psm1.pose_rcm2world(self.psm1.get_current_position())
         workspace_limits = self.workspace_limits1
-        pose_world[:3, 3] = np.clip(pose_world[:3, 3] + action[:3],
-                                    workspace_limits[:, 0] - [0.02, 0.02, 0.],
-                                    workspace_limits[:, 1] + [0.02, 0.02, 0.08])  # clip to ensure convergence
+        pose_world_next[:3, 3] = np.clip(pose_world[:3, 3] + action[:3],
+                                         workspace_limits[:, 0] - [0.02, 0.02, 0.],
+                                         workspace_limits[:, 1] + [0.02, 0.02, 0.08])  # clip to ensure convergence
         rot = get_euler_from_matrix(pose_world[:3, :3])
+        # wrap and clip rotation, 没有影响, 只是调整适应pybullet的内部表达
         if self.ACTION_MODE == 'yaw':
-            action[3] *= np.deg2rad(30)  # yaw, limit maximum change in rotation
             rot = (self.psm1_eul[0], self.psm1_eul[1], wrap_angle(rot[2] + action[3]))  # only change yaw
         elif self.ACTION_MODE == 'pitch':
-            action[3] *= np.deg2rad(15)  # pitch, limit maximum change in rotation
+            # action[3] *= np.deg2rad(15)  # pitch, limit maximum change in rotation
             pitch = np.clip(wrap_angle(rot[1] + action[3]), np.deg2rad(-90), np.deg2rad(90))
             rot = (self.psm1_eul[0], pitch, self.psm1_eul[2])  # only change pitch
         else:
             raise NotImplementedError
-        pose_world[:3, :3] = get_matrix_from_euler(rot)
-        action_rcm = self.psm1.pose_world2rcm(pose_world)
-        # time1 = time.time()
+        
+        pose_world_next[:3, :3] = get_matrix_from_euler(rot)
+        action_rcm = self.psm1.pose_world2rcm(pose_world_next)  # 4x4
         self.psm1.move(action_rcm)
-        # time2 = time.time()
 
-
+        # recording
         self.psm_1_matrices.append(action_rcm)
         self.psm_1_jaw.append(action[4])
 
@@ -334,16 +325,61 @@ class PsmEnv(SurEnv):
             self.psm1.close_jaw()
             self._activate(0)
         else:
-            self.psm1.move_jaw(np.deg2rad(40))  # open jaw angle; can tune
+            jaw_next = np.clip(action[4], 0, np.deg2rad(80.0))
+            self.psm1.move_jaw(jaw_next)   # open jaw angle
             self._release(0)
-        # time3 = time.time()
-        # print("transform time: {:.4f}, IK time: {:.4f}, jaw time: {:.4f}, total time: {:.4f}"
-        #       .format(time1 - time0, time2 - time1, time3 - time2, time3 - time0))
 
-        # # only for demo
-        # act = self.psm1.get_current_position().reshape(-1)
-        # act = np.append(act, int(action[4] < 0))
-        # self.actions.append(act)
+    # def _set_action(self, action: np.ndarray):
+    #     """
+    #     delta_position (3), delta_theta (1) and open/close the gripper (1)
+    #     in the world frame
+    #     """
+    #     assert len(action) == self.ACTION_SIZE, "The action should have the same dim with the ACTION_SIZE"
+    #     # time0 = time.time()
+    #     action = action.copy()  # ensure that we don't change the action outside of this scope
+    #     # action[:3] *= 0.01 * self.SCALING  # position, limit maximum change in position
+    #     pose_world = self.psm1.pose_rcm2world(self.psm1.get_current_position())
+    #     workspace_limits = self.workspace_limits1
+    #     pose_world[:3, 3] = np.clip(pose_world[:3, 3] + action[:3],
+    #                                 workspace_limits[:, 0] - [0.02, 0.02, 0.],
+    #                                 workspace_limits[:, 1] + [0.02, 0.02, 0.08])  # clip to ensure convergence
+    #     rot = get_euler_from_matrix(pose_world[:3, :3])
+    #     if self.ACTION_MODE == 'yaw':
+    #         action[3] *= np.deg2rad(30)  # yaw, limit maximum change in rotation
+    #         rot = (self.psm1_eul[0], self.psm1_eul[1], wrap_angle(rot[2] + action[3]))  # only change yaw
+    #     elif self.ACTION_MODE == 'pitch':
+    #         action[3] *= np.deg2rad(15)  # pitch, limit maximum change in rotation
+    #         pitch = np.clip(wrap_angle(rot[1] + action[3]), np.deg2rad(-90), np.deg2rad(90))
+    #         rot = (self.psm1_eul[0], pitch, self.psm1_eul[2])  # only change pitch
+    #     else:
+    #         raise NotImplementedError
+    #     pose_world[:3, :3] = get_matrix_from_euler(rot)
+    #     action_rcm = self.psm1.pose_world2rcm(pose_world)
+    #     # time1 = time.time()
+    #     self.psm1.move(action_rcm)
+    #     # time2 = time.time()
+
+
+    #     self.psm_1_matrices.append(action_rcm)
+    #     self.psm_1_jaw.append(action[4])
+
+    #     # jaw
+    #     if self.block_gripper:
+    #         action[4] = -1
+    #     if action[4] < 0:
+    #         self.psm1.close_jaw()
+    #         self._activate(0)
+    #     else:
+    #         self.psm1.move_jaw(np.deg2rad(40))  # open jaw angle; can tune
+    #         self._release(0)
+    #     # time3 = time.time()
+    #     # print("transform time: {:.4f}, IK time: {:.4f}, jaw time: {:.4f}, total time: {:.4f}"
+    #     #       .format(time1 - time0, time2 - time1, time3 - time2, time3 - time0))
+
+    #     # # only for demo
+    #     # act = self.psm1.get_current_position().reshape(-1)
+    #     # act = np.append(act, int(action[4] < 0))
+    #     # self.actions.append(act)
 
     def _is_success(self, achieved_goal, desired_goal):
         """ Indicates whether or not the achieved goal successfully achieved the desired goal.

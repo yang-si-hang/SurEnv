@@ -2,6 +2,8 @@
 
 action: [dx, dy, dz, dyaw, jaw_control]
 state: 
+
+oracle policy: move to 4 waypoints sequentially
 """
 import os
 import time
@@ -74,18 +76,18 @@ class NeedlePickEnv(PsmEnv):
                 }),
             })
 
-
     def step(self, action: np.ndarray)-> Tuple[dict, float, bool, bool, dict]:
         """
         执行一步环境交互, 并返回符合 Gymnasium API 的5个值.
         p_step表示步进仿真若干时间, 与FPS对齐.
-        action的大小需要与FPS耦合, 以保证物理时间上的最大位移变化一致.
+        action为发给机器人的真实增量指令, 同真实场景
         ! 潜在问题: 无法控制夹爪的开合速度 !
         """
         # 预处理动作并驱动机器人、步进仿真 (调用父类 PsmEnv 的辅助方法)
         self.current_step += 1
         if len(action.shape) > 1:
             action = action.squeeze()
+        # keep action in valid range
         action = np.clip(action, self.action_space.low, self.action_space.high)
         self._set_action(action)
         p_step(self._duration)
@@ -255,6 +257,7 @@ class NeedlePickEnv(PsmEnv):
             tcp_pos_cam, tcp_orn_tcp, np.array([tcp_pose[6]]) # 3+4+1-dim
         ])
 
+        # 3-dim position, 3-dim euler angle, 1-dim jaw angle (radian) in world frame
         obs_dict = {
             'robot_state': tcp_pose_hybrid.astype(np.float32),
         }
@@ -287,6 +290,7 @@ class NeedlePickEnv(PsmEnv):
             p.changeVisualShape(self.goal_sphere_id, -1, rgbaColor=[1, 0, 0, 0])
             wrist_img = self._get_wrist_camera_image(idx=0)
 
+            # (480, 640, 3), uint8
             obs_dict.update({
                 "images": {
                     "env_cam": env_img.astype(np.uint8),
@@ -362,10 +366,9 @@ class NeedlePickEnv(PsmEnv):
         """
         # four waypoints executed in sequential order
         action = np.zeros(5)
-        action[4] = -0.5
-        gain = 10.  # P控制器
+        gain = 1.  # P控制器
         # 依旧有问题，只能大致控制速度，还和FPS耦合
-        MAX_DELTA_POS = 0.05 * self.SCALING / self.FPS * 1  # 每次传给机器人控制的最大位移变化
+        MAX_DELTA_POS = 0.06 * self.SCALING / self.FPS  # 每次传给机器人控制的最大位移变化
         for i, waypoint in enumerate(self._waypoints):
             if waypoint is None:
                 continue
@@ -380,7 +383,7 @@ class NeedlePickEnv(PsmEnv):
             #     delta_pos /= np.abs(delta_pos).max()
             # scale_factor = 0.1 # 0.4      # 控制速度的缩放比例
             # delta_pos *= scale_factor
-            action = np.array([delta_pos[0], delta_pos[1], delta_pos[2], delta_yaw, waypoint[4]])
+            action = np.array([delta_pos[0], delta_pos[1], delta_pos[2], delta_yaw, waypoint[4]*np.deg2rad(80)])
             break
 
         return action
@@ -524,7 +527,7 @@ if __name__ == "__main__":
     env = NeedlePickEnv(render_mode="rgb_array", obs_type="rgb")  # create one process and corresponding env
 
     env.reset(seed=155)
-    test(env=env, horizon=800)
+    test(env=env, horizon=700)
     # env.render()
     # time.sleep(200)
     env.close()
